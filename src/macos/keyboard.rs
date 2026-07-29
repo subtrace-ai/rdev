@@ -3,8 +3,9 @@
 // `CGEventKeyboardGetUnicodeString` instead of TIS + `UCKeyTranslate`. The TIS
 // functions (`TISCopyCurrentKeyboardInputSource` / `TISGetInputSourceProperty`)
 // contain `dispatch_assert_queue(main)` on macOS Sequoia and abort the process
-// when called off the main thread, which is where rdev's event-tap callback and
-// any background `KeyboardState` user run. Trade-off: dead-key sequences
+// when called off the main thread. rdev cannot guarantee it is on it: the
+// event-tap callback runs on whichever thread installed the tap, and
+// `KeyboardState` is `Send`. Trade-off: dead-key sequences
 // ("´" + "e" → "é") are no longer composed across events, since the synthetic
 // event carries no dead-key state. Shift/caps reach the translation as event
 // flags; `examples/subtrace_offmain_layout.rs` asserts that they do.

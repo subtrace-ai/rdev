@@ -84,11 +84,12 @@ pub type QCallback = unsafe extern "C" fn(
 // SUBTRACE FORK PATCH (rdev 0.5.3): on macOS Sequoia the Text Input Source
 // APIs abort with `dispatch_assert_queue(main)` when called off the main
 // thread. rdev derived a key's `name` via `Keyboard::create_string_for_key`,
-// which calls those APIs from the CGEventTap callback — a background thread in
-// this app — so every keystroke crashed the process. `Keyboard::string_from_event`
-// reads the Unicode string the window server already stored on the event; it
-// touches no input-source state and is safe on the callback thread. It needs no
-// `Keyboard` either, so the tap callbacks no longer lock a global mutex per event.
+// which calls those APIs from the CGEventTap callback — running on whichever
+// thread installed the tap — so every keystroke off the main thread crashed the
+// process. `Keyboard::string_from_event` reads the Unicode string the window
+// server already stored on the event; it touches no input-source state and is
+// safe on any thread. It needs no `Keyboard` either, so the tap callbacks no
+// longer lock a global mutex per event.
 pub unsafe fn convert(_type: CGEventType, cg_event: &CGEvent) -> Option<Event> {
     let option_type = match _type {
         CGEventType::LeftMouseDown => Some(EventType::ButtonPress(Button::Left)),
