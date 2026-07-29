@@ -5,14 +5,23 @@
 // contain `dispatch_assert_queue(main)` on macOS Sequoia and abort the process
 // when called off the main thread. rdev cannot guarantee it is on it: the
 // event-tap callback runs on whichever thread installed the tap, and
-// `KeyboardState` is `Send`. Trade-off: dead-key sequences
-// ("´" + "e" → "é") are no longer composed across events, since the synthetic
-// event carries no dead-key state. Shift/caps reach the translation as event
-// flags; `examples/subtrace_offmain_layout.rs` asserts that they do.
+// `KeyboardState` is `Send`.
+//
+// Ceiling, paid only by `KeyboardState::add`: it has no real event, so it
+// translates a synthetic one that was never posted, and that translation reads
+// nothing the caller puts on the event. Measured on a US-layout macOS runner
+// (subtrace-ai/subtrace run 30434587990): `CGEventSetFlags` is ignored, so
+// shift and caps lock no longer reach the keycode translation the way
+// `UCKeyTranslate`'s `modifier_state` did. Dead-key sequences ("´" + "e" → "é")
+// are likewise not composed across events, since no `dead_state` survives a
+// call. `add` therefore yields the layout's base character for a keycode. What
+// the `HIDSystemState` source contributes on a machine physically holding a
+// modifier is untested. The event-tap path is unaffected — it reads the real
+// event, which the window server already translated.
 use crate::macos::keycodes::code_from_key;
 use crate::rdev::{EventType, Key, KeyboardState};
 use core_foundation::string::UniChar;
-use core_graphics::event::{CGEvent, CGEventFlags};
+use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types::ForeignType;
 use std::convert::TryInto;
@@ -32,17 +41,11 @@ extern "C" {
     );
 }
 
-pub struct Keyboard {
-    shift: bool,
-    caps_lock: bool,
-}
+pub struct Keyboard;
 
 impl Keyboard {
     pub fn new() -> Option<Keyboard> {
-        Some(Keyboard {
-            shift: false,
-            caps_lock: false,
-        })
+        Some(Keyboard)
     }
 
     /// Reads the Unicode string the window server already stored on `cg_event`.
@@ -63,15 +66,13 @@ impl Keyboard {
         String::from_utf16(&buff[..length]).ok()
     }
 
-    pub(crate) unsafe fn create_string_for_key(
-        &mut self,
-        code: u32,
-        flags: CGEventFlags,
-    ) -> Option<String> {
+    /// Translates `code` through a synthetic event that is never posted. The
+    /// translation reads only the keycode and the active layout — see the
+    /// module comment's ceiling — so there is no modifier state to pass in.
+    pub(crate) unsafe fn string_for_key(code: u32) -> Option<String> {
         let code: u16 = code.try_into().ok()?;
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
         let event = CGEvent::new_keyboard_event(source, code, true).ok()?;
-        event.set_flags(flags);
         Self::string_from_event(&event)
     }
 }
@@ -79,40 +80,14 @@ impl Keyboard {
 impl KeyboardState for Keyboard {
     fn add(&mut self, event_type: &EventType) -> Option<String> {
         match event_type {
-            EventType::KeyPress(key) => match key {
-                Key::ShiftLeft | Key::ShiftRight => {
-                    self.shift = true;
-                    None
-                }
-                Key::CapsLock => {
-                    self.caps_lock = !self.caps_lock;
-                    None
-                }
-                key => {
-                    let code = code_from_key(*key)?;
-                    let mut flags = CGEventFlags::CGEventFlagNull;
-                    if self.shift {
-                        flags |= CGEventFlags::CGEventFlagShift;
-                    }
-                    if self.caps_lock {
-                        flags |= CGEventFlags::CGEventFlagAlphaShift;
-                    }
-                    unsafe { self.create_string_for_key(code.into(), flags) }
-                }
-            },
-            EventType::KeyRelease(key) => match key {
-                Key::ShiftLeft | Key::ShiftRight => {
-                    self.shift = false;
-                    None
-                }
-                _ => None,
-            },
+            EventType::KeyPress(Key::ShiftLeft | Key::ShiftRight | Key::CapsLock) => None,
+            EventType::KeyPress(key) => {
+                let code = code_from_key(*key)?;
+                unsafe { Self::string_for_key(code.into()) }
+            }
             _ => None,
         }
     }
 
-    fn reset(&mut self) {
-        self.shift = false;
-        self.caps_lock = false;
-    }
+    fn reset(&mut self) {}
 }
