@@ -1,66 +1,45 @@
 // SUBTRACE FORK regression probe for the macOS Sequoia keystroke crash.
 //
-// Before the common.rs patch, rdev derived a key's name inside its event-tap
-// callback via the Text Input Source APIs, which abort with
-// `dispatch_assert_queue(main)` when called off the main thread — and rdev's
-// callback runs on a background thread in this app, so every keystroke crashed.
-// The fix reads the Unicode string the window server already stored on the
-// event, via `CGEventKeyboardGetUnicodeString`, which is safe off the main
-// thread. This probe exercises exactly that call from a background thread.
+// Before the patch, rdev derived a key's name via the Text Input Source APIs,
+// which abort with `dispatch_assert_queue(main)` when called off the main
+// thread — and both rdev's event-tap callback and any background
+// `KeyboardState` user run there, so every keystroke crashed the process. The
+// fork resolves names through `CGEventKeyboardGetUnicodeString`, which touches
+// no input-source state.
 //
-// Run on macOS:  cargo run --example subtrace_offmain_layout
+// Run on macOS with a US layout:  cargo run --example subtrace_offmain_layout
 // Exit 0 = fixed. A crash / non-zero exit = regression.
+//
+// The shifted case is the open question Apple's docs do not answer:
+// `CGEventKeyboardGetUnicodeString` translates an unposted synthetic event from
+// its virtual keycode, and whether it honours flags set via `CGEventSetFlags`
+// is undocumented. This probe answers it on real hardware.
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use core_graphics::event::CGEvent;
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    use foreign_types::ForeignType;
-    use std::ffi::c_void;
+    use rdev::{EventType, Key, Keyboard, KeyboardState};
 
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGEventKeyboardGetUnicodeString(
-            event: *mut c_void,
-            max_string_length: usize,
-            actual_string_length: *mut usize,
-            unicode_string: *mut u16,
-        );
-    }
-
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .expect("invariant: creating a private CGEventSource never needs permissions");
-    let event = CGEvent::new_keyboard_event(source, 0, true)
-        .expect("invariant: constructing a keyboard CGEvent succeeds");
-    event.set_string("a");
-
-    let event_ptr = event.as_ptr() as usize;
-    let translated = std::thread::spawn(move || {
-        let mut buff = [0_u16; 8];
-        let mut length: usize = 0;
-        // SAFETY: `event_ptr` points at the CGEvent owned by `main`, kept alive
-        // until this thread is joined below; the buffer bounds match the call.
-        unsafe {
-            CGEventKeyboardGetUnicodeString(
-                event_ptr as *mut c_void,
-                buff.len(),
-                &mut length as *mut usize,
-                buff.as_mut_ptr(),
-            );
-            String::from_utf16(&buff[..length]).ok()
-        }
+    let (plain, shifted) = std::thread::spawn(|| {
+        let mut keyboard = Keyboard::new().expect("invariant: Keyboard::new never fails on macOS");
+        let plain = keyboard.add(&EventType::KeyPress(Key::KeyA));
+        keyboard.add(&EventType::KeyPress(Key::ShiftLeft));
+        let shifted = keyboard.add(&EventType::KeyPress(Key::KeyA));
+        (plain, shifted)
     })
     .join()
     .expect("probe worker thread panicked");
 
-    drop(event);
-
+    println!("off-main key names: plain={plain:?} shifted={shifted:?}");
     assert_eq!(
-        translated.as_deref(),
+        plain.as_deref(),
         Some("a"),
-        "off-main-thread key string extraction must succeed without crashing"
+        "off-main key-name resolution must succeed without crashing"
     );
-    println!("off-main-thread extraction OK: {translated:?}");
+    assert_eq!(
+        shifted.as_deref(),
+        Some("A"),
+        "shift flags must reach the synthetic event's translation"
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

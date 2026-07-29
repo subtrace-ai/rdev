@@ -3,11 +3,8 @@ use crate::macos::keyboard::Keyboard;
 use crate::rdev::{Button, Event, EventType};
 use cocoa::base::id;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, EventField};
-use foreign_types::ForeignType;
-use lazy_static::lazy_static;
 use std::convert::TryInto;
 use std::os::raw::c_void;
-use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::macos::keycodes::key_from_code;
@@ -36,9 +33,6 @@ pub enum CGEventTapOption {
 }
 
 pub static mut LAST_FLAGS: CGEventFlags = CGEventFlags::CGEventFlagNull;
-lazy_static! {
-    pub static ref KEYBOARD_STATE: Mutex<Keyboard> = Mutex::new(Keyboard::new().unwrap());
-}
 
 // https://developer.apple.com/documentation/coregraphics/cgeventmask?language=objc
 pub type CGEventMask = u64;
@@ -90,44 +84,13 @@ pub type QCallback = unsafe extern "C" fn(
 // SUBTRACE FORK PATCH (rdev 0.5.3): on macOS Sequoia the Text Input Source
 // APIs abort with `dispatch_assert_queue(main)` when called off the main
 // thread. rdev derived a key's `name` via `Keyboard::create_string_for_key`,
-// which calls those APIs from the CGEventTap callback — a background thread in
-// this app — so every keystroke crashed the process. `CGEventKeyboardGetUnicodeString`
-// reads the Unicode string the window server already stored on the event; it
-// touches no input-source state and is safe on the callback thread.
-type UniCharCount = usize;
-
-#[cfg(target_os = "macos")]
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGEventKeyboardGetUnicodeString(
-        event: core_graphics::sys::CGEventRef,
-        max_string_length: UniCharCount,
-        actual_string_length: *mut UniCharCount,
-        unicode_string: *mut u16,
-    );
-}
-
-unsafe fn keyboard_string_from_event(cg_event: &CGEvent) -> Option<String> {
-    const NAME_BUF_LEN: UniCharCount = 8;
-    let mut buff = [0_u16; NAME_BUF_LEN];
-    let mut length: UniCharCount = 0;
-    CGEventKeyboardGetUnicodeString(
-        cg_event.as_ptr(),
-        NAME_BUF_LEN,
-        &mut length as *mut UniCharCount,
-        buff.as_mut_ptr(),
-    );
-    if length == 0 {
-        return None;
-    }
-    String::from_utf16(&buff[..length]).ok()
-}
-
-pub unsafe fn convert(
-    _type: CGEventType,
-    cg_event: &CGEvent,
-    _keyboard_state: &mut Keyboard,
-) -> Option<Event> {
+// which calls those APIs from the CGEventTap callback — running on whichever
+// thread installed the tap — so every keystroke off the main thread crashed the
+// process. `Keyboard::string_from_event` reads the Unicode string the window
+// server already stored on the event; it touches no input-source state and is
+// safe on any thread. It needs no `Keyboard` either, so the tap callbacks no
+// longer lock a global mutex per event.
+pub unsafe fn convert(_type: CGEventType, cg_event: &CGEvent) -> Option<Event> {
     let option_type = match _type {
         CGEventType::LeftMouseDown => Some(EventType::ButtonPress(Button::Left)),
         CGEventType::LeftMouseUp => Some(EventType::ButtonRelease(Button::Left)),
@@ -171,7 +134,7 @@ pub unsafe fn convert(
     };
     if let Some(event_type) = option_type {
         let name = match event_type {
-            EventType::KeyPress(_) => keyboard_string_from_event(cg_event),
+            EventType::KeyPress(_) => Keyboard::string_from_event(cg_event),
             _ => None,
         };
         return Some(Event {
