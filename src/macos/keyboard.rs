@@ -6,7 +6,8 @@
 // when called off the main thread, which is where rdev's event-tap callback and
 // any background `KeyboardState` user run. Trade-off: dead-key sequences
 // ("´" + "e" → "é") are no longer composed across events, since the synthetic
-// event carries no dead-key state.
+// event carries no dead-key state. Shift/caps reach the translation as event
+// flags; `examples/subtrace_offmain_layout.rs` asserts that they do.
 use crate::macos::keycodes::code_from_key;
 use crate::rdev::{EventType, Key, KeyboardState};
 use core_foundation::string::UniChar;
