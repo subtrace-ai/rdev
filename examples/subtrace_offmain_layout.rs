@@ -10,10 +10,11 @@
 // Run on macOS with a US layout:  cargo run --example subtrace_offmain_layout
 // Exit 0 = fixed. A crash / non-zero exit = regression.
 //
-// The shifted case is the open question Apple's docs do not answer:
-// `CGEventKeyboardGetUnicodeString` translates an unposted synthetic event from
-// its virtual keycode, and whether it honours flags set via `CGEventSetFlags`
-// is undocumented. This probe answers it on real hardware.
+// The shifted case pins the fork's modifier ceiling rather than a fix. Apple
+// does not document whether `CGEventKeyboardGetUnicodeString` honours flags on
+// an unposted synthetic event; measurement says it does not (subtrace-ai/
+// subtrace run 30434587990). `"A"` here would mean the ceiling has lifted and
+// `KeyboardState` can carry modifier state again.
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -37,8 +38,8 @@ fn main() {
     );
     assert_eq!(
         shifted.as_deref(),
-        Some("A"),
-        "shift flags must reach the synthetic event's translation"
+        Some("a"),
+        "known ceiling: shift does not reach an unposted synthetic event's translation"
     );
 }
 
